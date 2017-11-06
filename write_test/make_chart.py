@@ -74,7 +74,7 @@ def main():
     parser = argparse.ArgumentParser(description="Make a pretty chart")
     parser.add_argument("results_filenames", nargs='+')
     args = parser.parse_args()
-    if results_filenames != 2:
+    if len(args.results_filenames) != 2:
         print('Sorry, this currently takes exactly 2 filenames.')
         sys.exit(1)
     subplots = []
