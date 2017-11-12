@@ -17,14 +17,16 @@ _SIZET_ST = struct.Struct('@Q')
 
 
 class SqliteWriter:
-
-    def __init__(self, filename: str, already_exists: bool) -> None:
-        print(self)
+    def __init__(self, filename: str, already_exists: bool, use_sqlite_wal: bool) -> None:
         self.conn = sqlite3.connect(filename)
         if not already_exists:
             self.conn.execute('CREATE TABLE t(key INTEGER PRIMARY KEY ASC, val BLOB);')
         self.conn.commit()
-        self.label = 'sqlite'
+        if use_sqlite_wal:
+            self.conn.execute('PRAGMA journal_mode=WAL;')
+            self.label = 'sqlite_wal'
+        else:
+            self.label = 'sqlite'
 
     def write(self, data: bytes, batch_size: int) -> None:
             self.conn.executemany('INSERT INTO t VALUES (?, ?)',
@@ -37,7 +39,6 @@ class SqliteWriter:
 
 class PostgresqlWriter(SqliteWriter):
     def __init__(self, delete_first: bool) -> None:
-        print(self)
         self.conn = psycopg2.connect("host='localhost' dbname='db' user='synapse' password='synapse'")
         self.curs = self.conn.cursor()
         if delete_first:
@@ -60,7 +61,6 @@ class PostgresqlWriter(SqliteWriter):
 
 class LmdbWriter:
     def __init__(self, filename: str) -> None:
-        print(self)
         MAP_SIZE = 20 * 1024 * 1024 * 1024
         self.env = lmdb.Environment(filename, map_size=MAP_SIZE, subdir=False, metasync=False, sync=True,
                                     readahead=False, max_dbs=4, writemap=True, meminit=False, lock=True)
@@ -79,11 +79,15 @@ class LmdbWriter:
 
 
 class SynapseWriter:
-    def __init__(self, filename: str, use_sqlite: bool, use_postgres: bool, delete_first: bool) -> None:
+    def __init__(self, filename: str, *, use_sqlite: bool, use_postgres: bool, delete_first: bool,
+                 use_sqlite_wal=False) -> None:
         print(self)
-        if use_sqlite:
+        if use_sqlite or use_sqlite_wal:
             url = 'sqlite:///' + filename
-            self.label = 'syn_sqlite'
+            if use_sqlite_wal:
+                self.label = 'syn_sqlite_wal'
+            else:
+                self.label = 'syn_sqlite'
         elif use_postgres:
             url = 'postgres://synapse:synapse@localhost/db/synapsetable'
             self.label = 'syn_postgres'
@@ -93,6 +97,10 @@ class SynapseWriter:
             url = 'lmdb:///' + filename
             self.label = 'syn_lmdb'
         self.core = s_cortex.openurl(url)
+        if use_sqlite_wal:
+            db = self.core.store.dbpool.get()
+            db.execute('PRAGMA journal_mode=WAL;')
+            self.core.store.dbpool.put(db)
 
     def _drop_synapse_table(self):
         conn = psycopg2.connect("host='localhost' dbname='db' user='synapse' password='synapse'")
@@ -118,10 +126,10 @@ class SynapseWriter:
         pass
 
 
-def make_db(size_in_mb: int, delete_first: bool, filename: str, use_sqlite=False, use_postgresql=False,
-            use_synapse=False):
+def make_db(*, size_in_mb: int, delete_first: bool, filename: str, use_sqlite=False, use_postgresql=False,
+            use_synapse=False, use_sqlite_wal=False):
     me = psutil.Process()
-    if use_sqlite and use_postgresql:
+    if (use_sqlite and use_postgresql) or (use_sqlite_wal and use_postgresql):
         raise Exception('Invalid parameters.')
     if delete_first and not use_postgresql:
         try:
@@ -133,13 +141,16 @@ def make_db(size_in_mb: int, delete_first: bool, filename: str, use_sqlite=False
         already_exists = False
     if use_synapse:
         writer: Union[SynapseWriter, SqliteWriter, LmdbWriter] = \
-                SynapseWriter(filename, use_sqlite, use_postgresql, delete_first)
+                SynapseWriter(filename, use_sqlite=use_sqlite, use_sqlite_wal=use_sqlite_wal, use_postgres=use_postgresql, 
+                              delete_first=delete_first)
     elif use_sqlite:
-        writer = SqliteWriter(filename, already_exists)
+        writer = SqliteWriter(filename, already_exists, use_sqlite_wal=use_sqlite_wal)
     elif use_postgresql:
         writer = PostgresqlWriter(delete_first)
     else:
         writer = LmdbWriter(filename)
+
+    print("Starting write test for %s" % writer.label)
     if already_exists:
         print("Using existing DB")
     total_size = size_in_mb * 1024 * 1024
@@ -176,14 +187,13 @@ def main():
     parser = argparse.ArgumentParser(description="Write a database")
     parser.add_argument("--delete-first", action='store_true')
     parser.add_argument("--use-sqlite", action='store_true')
+    parser.add_argument("--use-sqlite-wal", action='store_true')
     parser.add_argument("--use-postgresql", action='store_true')
     parser.add_argument("--use-synapse", action='store_true')
-    parser.add_argument("db_filename")
+    parser.add_argument("filename")
     parser.add_argument("size_in_mb", type=int)
     args = parser.parse_args()
-    make_db(args.size_in_mb, args.delete_first, args.db_filename, args.use_sqlite, args.use_postgresql, 
-            args.use_synapse)
-
+    make_db(**vars(args))
 
 if __name__ == '__main__':
     import argparse
